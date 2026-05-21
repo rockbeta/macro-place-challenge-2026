@@ -28,7 +28,7 @@ make -C submissions/vibeCpp
 ## Threading
 
 The C++ placer uses `std::thread`/`std::async` for parallel all-macro SA shards.
-By default it uses up to 8 hardware threads. Override that with:
+By default the main placer uses up to 8 hardware threads, and the fast placer uses up to 2. Override that with:
 
 ```bash
 VIBECPP_THREADS=4 uv run evaluate submissions/vibeCpp/placer.py -b ibm04
@@ -67,23 +67,27 @@ uv run evaluate submissions/vibeCpp/placer.py -b ibm04
 By default, `placer.py` runs the analytical frontend from
 `submissions/vibe/vplacer.py` through `step8_global_analytical_place`, then
 serializes that placement into the C++ legalizer/SA flow. The adapter runs eight
-different analytical warm-start seeds, sends each through `placerFast.cpp`,
-keeps the lowest proxy-cost candidate, and then sends that candidate through
-`placer.cpp` for the final SA push.
+different analytical warm-start seeds **in parallel worker processes**, sends each
+through `placerFast.cpp`, keeps the top 2 lowest proxy-cost candidates, and then
+sends those candidates through `placer.cpp` for the final SA push.
 
-Change the seed sweep width for debugging with:
+Change the seed sweep settings with:
 
 ```bash
-VIBECPP_SEED_SWEEP_COUNT=1 uv run evaluate submissions/vibeCpp/placer.py -b ibm04
+VIBECPP_SEED_SWEEP_COUNT=8 \
+VIBECPP_SEED_SWEEP_STRIDE=1009 \
+VIBECPP_FINAL_TOPK=2 \
+VIBECPP_KNOB_PERTURB=1 \
+uv run evaluate submissions/vibeCpp/placer.py -b ibm04
 ```
 
-Each analytical seed pass writes step snapshots to `vis_step/` by default, with
+Each analytical seed pass can write step snapshots to `vis_step/`, with
 filenames such as `ibm01_iter1_step1.png`. The snapshots show hard, fixed, and
-soft macros, plus the hottest density and congestion grid cells. Disable or
-redirect these images with:
+soft macros, plus the hottest density and congestion grid cells. They are
+disabled by default for speed. Enable or redirect these images with:
 
 ```bash
-VIBECPP_DUMP_VIS_STEPS=0 uv run evaluate submissions/vibeCpp/placer.py -b ibm04
+VIBECPP_DUMP_VIS_STEPS=1 uv run evaluate submissions/vibeCpp/placer.py -b ibm04
 VIBECPP_VIS_STEP_DIR=/tmp/vibe_steps uv run evaluate submissions/vibeCpp/placer.py -b ibm04
 ```
 
@@ -94,7 +98,7 @@ directly with:
 VIBECPP_ANALYTICAL_WARMSTART=0 uv run evaluate submissions/vibeCpp/placer.py -b ibm04
 ```
 
-Limit PyTorch CPU threads used by the analytical warm start with:
+Limit PyTorch CPU threads used by the analytical warm start in each worker with:
 
 ```bash
 VIBECPP_ANALYTICAL_THREADS=4 uv run evaluate submissions/vibeCpp/placer.py -b ibm04
