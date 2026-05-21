@@ -32,21 +32,21 @@ constexpr double HROUTING_ALLOC = 30.304;
 constexpr double VROUTING_ALLOC = 71.304;
 constexpr int SMOOTH_RANGE = 2;
 
-constexpr int ALL_MACRO_SA_MAX_ITERS_DEFAULT = 600000;
-constexpr int ALL_MACRO_SA_SHORT_ITERS_DEFAULT = 20000;
+constexpr int ALL_MACRO_SA_MAX_ITERS_DEFAULT = 800000;
+constexpr int ALL_MACRO_SA_SHORT_ITERS_DEFAULT = 40000;
 constexpr double ALL_MACRO_SA_CONG_WEIGHT = 0.8;
 constexpr double ALL_MACRO_SA_DENSITY_WEIGHT = 0.5;
 
-constexpr int CONGESTION_POLISH_ITERS_DEFAULT = 50000;
+constexpr int CONGESTION_POLISH_ITERS_DEFAULT = 100000;
 constexpr double CONGESTION_POLISH_ACCEPT_TOL = 1e-6;
 constexpr double CONGESTION_POLISH_MIN_CONGESTION = 1.40;
 
-constexpr int HOT_CONGESTION_SA_ITERS_DEFAULT = 600000;
+constexpr int HOT_CONGESTION_SA_ITERS_DEFAULT = 800000;
 constexpr double HOT_CONGESTION_SA_CONG_WEIGHT = 2.0;
 constexpr double HOT_CONGESTION_SA_DENSITY_WEIGHT = 0.5;
 constexpr double HOT_CONGESTION_ACCEPT_TOL = 1e-6;
 
-constexpr int SWAP_SA_ITERS_DEFAULT = 200000;
+constexpr int SWAP_SA_ITERS_DEFAULT = 400000;
 constexpr int SWAP_SA_LOG_INTERVAL = 10000;
 constexpr double SWAP_SA_ACCEPT_TOL = 1e-12;
 constexpr double SWAP_SA_MIN_SUCCESS_RATE = 0.01;
@@ -2059,12 +2059,12 @@ std::vector<Point> hot_congestion_sa_polish(
 
     std::vector<Point> current_pos = positions;
     ProxyComponents current = compute_proxy(b, current_pos);
-    static const std::vector<double> hot_move_scales{0.4, 0.7, 1.0, 1.3, 1.7, 2.0};
+    static const std::vector<double> hot_move_scales{0.4, 0.7, 1.0, 1.3, 1.7, 2.0, 2.2};
     std::cerr << "[vibeCpp] hot congestion SA hot_nets=" << hot_net_count
               << " hot_macros=" << hot_macro_count
               << " hard=" << hot_hard_count << " soft=" << hot_soft_count
               << " iters=" << max_iters
-              << " move_scales=0.4,0.7,1.0,1.3,1.7,2.0\n";
+              << " move_scales=0.4,0.7,1.0,1.3,1.7,2.0,2.2\n";
 
     std::vector<Point> candidate = parallel_sa_all_macro(
         b, positions, {}, seed,
