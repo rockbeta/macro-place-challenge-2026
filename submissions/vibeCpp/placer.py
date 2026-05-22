@@ -863,7 +863,7 @@ GLOBAL_PLACE_ACCEPT_TOL = 1e-6
 #   "float" → positive (>= 1e-12)
 #   "frac"  → clamp into (0.05, 0.95) — for density targets in [0, 1]
 #   "slack" → clamp into (0.05, 1.5)  — for density-target slack
-KNOB_PERTURB_REL_STD = 0.10
+KNOB_PERTURB_REL_STD = 0.20
 
 _KNOB_DEFAULTS = {
     "step3_iters":                       (STEP3_ITERS, "int"),
