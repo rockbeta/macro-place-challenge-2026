@@ -51,6 +51,11 @@ constexpr int SWAP_SA_LOG_INTERVAL = 10000;
 constexpr double SWAP_SA_ACCEPT_TOL = 1e-12;
 constexpr double SWAP_SA_MIN_SUCCESS_RATE = 0.01;
 
+constexpr int GLOBAL_MOVE_GRID_DEFAULT = 30;
+constexpr int GLOBAL_MOVE_TOP_CANDIDATES = 5;
+constexpr int GLOBAL_MOVE_LEGALIZE_SAMPLES = 7;
+constexpr double GLOBAL_MOVE_ACCEPT_TOL = 1e-12;
+
 constexpr double PROXY_WL_WEIGHT = 1.0;
 constexpr double PROXY_DENSITY_WEIGHT = 0.5;
 constexpr double PROXY_CONGESTION_WEIGHT = 0.5;
@@ -931,6 +936,28 @@ public:
         current_cost = abu_cost();
     }
 
+    IncrementalCongestionCost(const IncrementalCongestionCost& other, std::vector<Point>& positions)
+        : b(other.b),
+          pos(positions),
+          grid_w(other.grid_w),
+          grid_h(other.grid_h),
+          grid_v_routes(other.grid_v_routes),
+          grid_h_routes(other.grid_h_routes),
+          inv_grid_v_routes(other.inv_grid_v_routes),
+          inv_grid_h_routes(other.inv_grid_h_routes),
+          grid_size(other.grid_size),
+          abu_top_count(other.abu_top_count),
+          v_smooth(other.v_smooth),
+          h_smooth(other.h_smooth),
+          v_route(other.v_route),
+          h_route(other.h_route),
+          v_macro(other.v_macro),
+          h_macro(other.h_macro),
+          net_contribs(other.net_contribs),
+          net_route_keys(other.net_route_keys),
+          macro_contribs(other.macro_contribs),
+          current_cost(other.current_cost) {}
+
     double current() const { return current_cost; }
 
     std::pair<double, Token> begin_single_update(int moved_macro, const std::vector<int>& affected_nets) {
@@ -1790,13 +1817,21 @@ bool swap_has_hard_overlap(const BenchmarkData& b, const std::vector<Point>& pos
     }
 
     auto swapped_pos = [&](int idx) -> Point {
-        if (idx == a) return pa;
-        if (idx == c) return pc;
+        if (idx == a) {
+            return pa;
+        }
+        if (idx == c) {
+            return pc;
+        }
         return pos[idx];
     };
     std::vector<int> moved_hard;
-    if (a < b.n_hard) moved_hard.push_back(a);
-    if (c < b.n_hard) moved_hard.push_back(c);
+    if (a < b.n_hard) {
+        moved_hard.push_back(a);
+    }
+    if (c < b.n_hard) {
+        moved_hard.push_back(c);
+    }
     for (int idx : moved_hard) {
         Point pi = swapped_pos(idx);
         for (int j = 0; j < b.n_hard; ++j) {
@@ -1947,8 +1982,7 @@ std::vector<Point> swap_sa_polish(
                 best_a, pos[best_a].x, pos[best_a].y,
                 best_c, pos[best_c].x, pos[best_c].y);
             den_eval.accept_two(
-                den_pair.second,
-                best_a, pos[best_a].x, pos[best_a].y,
+                den_pair.second, best_a, pos[best_a].x, pos[best_a].y,
                 best_c, pos[best_c].x, pos[best_c].y);
             std::vector<int> affected = affected_nets_for_pair(b, best_a, best_c);
             auto cong_pair = cong_eval.begin_multi_update({best_a, best_c}, affected);
@@ -1987,6 +2021,492 @@ std::vector<Point> swap_sa_polish(
               << " congestion=" << current.congestion
               << " success_rate=" << static_cast<double>(accepted) / static_cast<double>(denom)
               << "\n";
+    return pos;
+}
+
+bool global_cell_center_bounds(
+    const BenchmarkData& b,
+    int idx,
+    int row,
+    int col,
+    int grid_rows,
+    int grid_cols,
+    double& lo_x,
+    double& hi_x,
+    double& lo_y,
+    double& hi_y
+) {
+    double cell_w = b.cw / static_cast<double>(grid_cols);
+    double cell_h = b.ch / static_cast<double>(grid_rows);
+    double x0 = col * cell_w;
+    double x1 = (col + 1) * cell_w;
+    double y0 = row * cell_h;
+    double y1 = (row + 1) * cell_h;
+    double hw = b.macros[idx].w * 0.5;
+    double hh = b.macros[idx].h * 0.5;
+    lo_x = std::max(x0 + 1e-6, hw + 1e-6);
+    hi_x = std::min(x1 - 1e-6, b.cw - hw - 1e-6);
+    lo_y = std::max(y0 + 1e-6, hh + 1e-6);
+    hi_y = std::min(y1 - 1e-6, b.ch - hh - 1e-6);
+    return lo_x <= hi_x && lo_y <= hi_y;
+}
+
+bool random_point_in_global_cell(
+    const BenchmarkData& b,
+    int idx,
+    int row,
+    int col,
+    int grid_rows,
+    int grid_cols,
+    std::mt19937_64& rng,
+    Point& out
+) {
+    double lo_x, hi_x, lo_y, hi_y;
+    if (!global_cell_center_bounds(b, idx, row, col, grid_rows, grid_cols,
+                                   lo_x, hi_x, lo_y, hi_y)) {
+        return false;
+    }
+    double x = lo_x;
+    double y = lo_y;
+    if (hi_x > lo_x) {
+        std::uniform_real_distribution<double> pick_x(lo_x, hi_x);
+        x = pick_x(rng);
+    }
+    if (hi_y > lo_y) {
+        std::uniform_real_distribution<double> pick_y(lo_y, hi_y);
+        y = pick_y(rng);
+    }
+    out = {x, y};
+    return true;
+}
+
+bool hard_location_clear_for_macro(
+    const BenchmarkData& b,
+    const std::vector<Point>& pos,
+    int idx,
+    Point p
+) {
+    if (!macro_center_inside_canvas(b, idx, p)) {
+        return false;
+    }
+    for (int j = 0; j < b.n_hard; ++j) {
+        if (j == idx) {
+            continue;
+        }
+        if (hard_pair_overlaps_at(b, idx, p, j, pos[j])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool find_nonoverlap_in_global_cell(
+    const BenchmarkData& b,
+    const std::vector<Point>& pos,
+    int idx,
+    int row,
+    int col,
+    int grid_rows,
+    int grid_cols,
+    Point anchor,
+    Point& out
+) {
+    double lo_x, hi_x, lo_y, hi_y;
+    if (!global_cell_center_bounds(b, idx, row, col, grid_rows, grid_cols,
+                                   lo_x, hi_x, lo_y, hi_y)) {
+        return false;
+    }
+
+    struct Probe {
+        Point p;
+        double dist = 0.0;
+    };
+    std::vector<Probe> probes;
+    auto add_probe = [&](double x, double y) {
+        if (x < lo_x || x > hi_x || y < lo_y || y > hi_y) {
+            return;
+        }
+        double dx = x - anchor.x;
+        double dy = y - anchor.y;
+        probes.push_back({{x, y}, dx * dx + dy * dy});
+    };
+
+    add_probe(anchor.x, anchor.y);
+    add_probe(0.5 * (lo_x + hi_x), 0.5 * (lo_y + hi_y));
+    for (int ix = 0; ix < GLOBAL_MOVE_LEGALIZE_SAMPLES; ++ix) {
+        double tx = GLOBAL_MOVE_LEGALIZE_SAMPLES == 1
+                        ? 0.5
+                        : static_cast<double>(ix) /
+                              static_cast<double>(GLOBAL_MOVE_LEGALIZE_SAMPLES - 1);
+        double x = lo_x + tx * (hi_x - lo_x);
+        for (int iy = 0; iy < GLOBAL_MOVE_LEGALIZE_SAMPLES; ++iy) {
+            double ty = GLOBAL_MOVE_LEGALIZE_SAMPLES == 1
+                            ? 0.5
+                            : static_cast<double>(iy) /
+                                  static_cast<double>(GLOBAL_MOVE_LEGALIZE_SAMPLES - 1);
+            double y = lo_y + ty * (hi_y - lo_y);
+            add_probe(x, y);
+        }
+    }
+
+    std::sort(probes.begin(), probes.end(), [](const Probe& a, const Probe& c) {
+        return a.dist < c.dist;
+    });
+    for (const Probe& probe : probes) {
+        if (hard_location_clear_for_macro(b, pos, idx, probe.p)) {
+            out = probe.p;
+            return true;
+        }
+    }
+    return false;
+}
+
+struct GlobalMoveCandidate {
+    int row = 0;
+    int col = 0;
+    Point point;
+    double proxy = 0.0;
+};
+
+struct GlobalMoveTarget {
+    int row = 0;
+    int col = 0;
+    Point point;
+};
+
+struct GlobalMoveEvalResult {
+    int probed = 0;
+    std::vector<GlobalMoveCandidate> candidates;
+};
+
+bool global_move_candidate_less(
+    const GlobalMoveCandidate& a,
+    const GlobalMoveCandidate& c
+) {
+    if (a.proxy != c.proxy) {
+        return a.proxy < c.proxy;
+    }
+    if (a.row != c.row) {
+        return a.row < c.row;
+    }
+    if (a.col != c.col) {
+        return a.col < c.col;
+    }
+    if (a.point.x != c.point.x) {
+        return a.point.x < c.point.x;
+    }
+    return a.point.y < c.point.y;
+}
+
+void add_global_move_candidate(
+    std::vector<GlobalMoveCandidate>& candidates,
+    const GlobalMoveCandidate& candidate,
+    double current_proxy
+) {
+    if (candidate.proxy >= current_proxy - GLOBAL_MOVE_ACCEPT_TOL) {
+        return;
+    }
+    candidates.push_back(candidate);
+    std::sort(candidates.begin(), candidates.end(), global_move_candidate_less);
+    if (static_cast<int>(candidates.size()) > GLOBAL_MOVE_TOP_CANDIDATES) {
+        candidates.resize(GLOBAL_MOVE_TOP_CANDIDATES);
+    }
+}
+
+ProxyComponents probe_single_move_proxy(
+    const BenchmarkData& b,
+    std::vector<Point>& pos,
+    IncrementalDensityCost& den_eval,
+    IncrementalCongestionCost& cong_eval,
+    const std::vector<double>& cur_hpwl,
+    double cur_total_wl,
+    double wl_norm,
+    int idx,
+    Point target
+) {
+    Point old = pos[idx];
+    pos[idx] = target;
+
+    auto den_pair = den_eval.begin_single_update(idx, target.x, target.y);
+    auto den_token = den_pair.second;
+    double old_wl = 0.0;
+    double new_wl = 0.0;
+    for (int net_i : b.macro_to_nets[idx]) {
+        double w = net_i < static_cast<int>(b.net_weights.size()) ? b.net_weights[net_i] : 1.0;
+        double hpwl = net_hpwl(b, pos, net_i) * w;
+        old_wl += cur_hpwl[net_i];
+        new_wl += hpwl;
+    }
+    auto cong_pair = cong_eval.begin_single_update(idx, b.macro_to_nets[idx]);
+    auto cong_token = cong_pair.second;
+
+    double candidate_total_wl = cur_total_wl + new_wl - old_wl;
+    ProxyComponents candidate;
+    candidate.wirelength = candidate_total_wl / wl_norm;
+    candidate.density = den_pair.first;
+    candidate.congestion = cong_pair.first;
+    candidate.proxy = proxy_overall(candidate.wirelength, candidate.density, candidate.congestion);
+
+    cong_eval.reject(cong_token);
+    den_eval.reject(den_token);
+    pos[idx] = old;
+    return candidate;
+}
+
+GlobalMoveEvalResult evaluate_global_move_targets(
+    const BenchmarkData& b,
+    const std::vector<Point>& base_pos,
+    const IncrementalDensityCost& base_den,
+    const IncrementalCongestionCost& base_cong,
+    const std::vector<double>& cur_hpwl,
+    double cur_total_wl,
+    double wl_norm,
+    double current_proxy,
+    int idx,
+    const std::vector<GlobalMoveTarget>& targets,
+    int begin,
+    int end
+) {
+    std::vector<Point> local_pos = base_pos;
+    IncrementalDensityCost local_den = base_den;
+    IncrementalCongestionCost local_cong(base_cong, local_pos);
+    GlobalMoveEvalResult result;
+    Point old = base_pos[idx];
+
+    for (int i = begin; i < end; ++i) {
+        const GlobalMoveTarget& target = targets[i];
+        double dx = target.point.x - old.x;
+        double dy = target.point.y - old.y;
+        if (dx * dx + dy * dy <= EPS) {
+            continue;
+        }
+        ProxyComponents candidate_proxy = probe_single_move_proxy(
+            b, local_pos, local_den, local_cong, cur_hpwl, cur_total_wl,
+            wl_norm, idx, target.point);
+        ++result.probed;
+        add_global_move_candidate(
+            result.candidates,
+            {target.row, target.col, target.point, candidate_proxy.proxy},
+            current_proxy);
+    }
+    return result;
+}
+
+bool accept_single_move_if_better(
+    const BenchmarkData& b,
+    std::vector<Point>& pos,
+    IncrementalDensityCost& den_eval,
+    IncrementalCongestionCost& cong_eval,
+    std::vector<double>& cur_hpwl,
+    double& cur_total_wl,
+    double wl_norm,
+    ProxyComponents& current,
+    int idx,
+    Point target,
+    bool verify_full_proxy
+) {
+    Point old = pos[idx];
+    pos[idx] = target;
+
+    auto den_pair = den_eval.begin_single_update(idx, target.x, target.y);
+    auto den_token = den_pair.second;
+    double old_wl = 0.0;
+    double new_wl = 0.0;
+    std::vector<std::pair<int, double>> updates;
+    updates.reserve(b.macro_to_nets[idx].size());
+    for (int net_i : b.macro_to_nets[idx]) {
+        double w = net_i < static_cast<int>(b.net_weights.size()) ? b.net_weights[net_i] : 1.0;
+        double hpwl = net_hpwl(b, pos, net_i) * w;
+        old_wl += cur_hpwl[net_i];
+        new_wl += hpwl;
+        updates.push_back({net_i, hpwl});
+    }
+    auto cong_pair = cong_eval.begin_single_update(idx, b.macro_to_nets[idx]);
+    auto cong_token = cong_pair.second;
+
+    double candidate_total_wl = cur_total_wl + new_wl - old_wl;
+    ProxyComponents candidate;
+    candidate.wirelength = candidate_total_wl / wl_norm;
+    candidate.density = den_pair.first;
+    candidate.congestion = cong_pair.first;
+    candidate.proxy = proxy_overall(candidate.wirelength, candidate.density, candidate.congestion);
+
+    bool improves = candidate.proxy < current.proxy - GLOBAL_MOVE_ACCEPT_TOL;
+    ProxyComponents verified = candidate;
+    if (improves && verify_full_proxy) {
+        verified = compute_proxy(b, pos);
+        improves = verified.proxy < current.proxy - GLOBAL_MOVE_ACCEPT_TOL;
+    }
+
+    if (!improves) {
+        cong_eval.reject(cong_token);
+        den_eval.reject(den_token);
+        pos[idx] = old;
+        return false;
+    }
+
+    for (const auto& item : updates) {
+        cur_hpwl[item.first] = item.second;
+    }
+    cur_total_wl = candidate_total_wl;
+    den_eval.accept_single(den_token, idx, target.x, target.y);
+    cong_eval.accept(cong_token);
+    current = verified;
+    return true;
+}
+
+std::vector<Point> global_grid_move_polish(
+    const BenchmarkData& b,
+    std::vector<Point> pos,
+    int seed,
+    int grid_rows,
+    int grid_cols
+) {
+    if (grid_rows <= 0 || grid_cols <= 0 || b.cw <= 0.0 || b.ch <= 0.0) {
+        return pos;
+    }
+
+    std::mt19937_64 rng(static_cast<uint64_t>(seed));
+    double cell_area = (b.cw / static_cast<double>(grid_cols)) *
+                       (b.ch / static_cast<double>(grid_rows));
+
+    std::vector<int> order;
+    order.reserve(b.n_total);
+    for (int i = 0; i < b.n_total; ++i) {
+        if (!b.macros[i].fixed) {
+            order.push_back(i);
+        }
+    }
+    std::sort(order.begin(), order.end(), [&](int a, int c) {
+        double area_a = b.macros[a].w * b.macros[a].h;
+        double area_c = b.macros[c].w * b.macros[c].h;
+        if (area_a != area_c) {
+            return area_a < area_c;
+        }
+        return a < c;
+    });
+
+    std::vector<double> cur_hpwl(b.n_nets, 0.0);
+    for (int ni = 0; ni < b.n_nets; ++ni) {
+        double w = ni < static_cast<int>(b.net_weights.size()) ? b.net_weights[ni] : 1.0;
+        cur_hpwl[ni] = net_hpwl(b, pos, ni) * w;
+    }
+    double cur_total_wl = std::accumulate(cur_hpwl.begin(), cur_hpwl.end(), 0.0);
+    double norm_net_count = b.wl_net_count > 0.0 ? b.wl_net_count : static_cast<double>(std::max(1, b.n_nets));
+    double wl_norm = std::max((b.cw + b.ch) * norm_net_count, EPS);
+    IncrementalDensityCost den_eval(b, pos);
+    IncrementalCongestionCost cong_eval(b, pos);
+    ProxyComponents current;
+    current.wirelength = cur_total_wl / wl_norm;
+    current.density = den_eval.current();
+    current.congestion = cong_eval.current();
+    current.proxy = proxy_overall(current.wirelength, current.density, current.congestion);
+
+    int considered = 0;
+    int accepted = 0;
+    int probed = 0;
+    int rejected_by_legalize = 0;
+    int eval_threads = std::min(vibe_thread_count(), std::max(1, grid_rows * grid_cols));
+    if (grid_rows * grid_cols < 256) {
+        eval_threads = 1;
+    }
+
+    std::cerr << "[vibeCpp] global grid move grid=" << grid_rows << "x" << grid_cols
+              << " cell_area=" << cell_area
+              << " top_candidates=" << GLOBAL_MOVE_TOP_CANDIDATES
+              << " eval_threads=" << eval_threads << "\n";
+
+    for (int idx : order) {
+        double area = b.macros[idx].w * b.macros[idx].h;
+        if (area >= cell_area) {
+            break;
+        }
+        ++considered;
+
+        std::vector<GlobalMoveTarget> targets;
+        targets.reserve(grid_rows * grid_cols);
+        for (int row = 0; row < grid_rows; ++row) {
+            for (int col = 0; col < grid_cols; ++col) {
+                Point target;
+                if (!random_point_in_global_cell(b, idx, row, col, grid_rows, grid_cols, rng, target)) {
+                    continue;
+                }
+                targets.push_back({row, col, target});
+            }
+        }
+
+        std::vector<GlobalMoveCandidate> best_cells;
+        if (targets.empty()) {
+            continue;
+        } else if (eval_threads <= 1 || static_cast<int>(targets.size()) < 64) {
+            const double current_proxy_snapshot = current.proxy;
+            const double total_wl_snapshot = cur_total_wl;
+            GlobalMoveEvalResult result = evaluate_global_move_targets(
+                b, pos, den_eval, cong_eval, cur_hpwl, total_wl_snapshot, wl_norm,
+                current_proxy_snapshot, idx, targets, 0, static_cast<int>(targets.size()));
+            probed += result.probed;
+            for (const GlobalMoveCandidate& candidate : result.candidates) {
+                add_global_move_candidate(best_cells, candidate, current_proxy_snapshot);
+            }
+        } else {
+            const int target_count = static_cast<int>(targets.size());
+            const double current_proxy_snapshot = current.proxy;
+            const double total_wl_snapshot = cur_total_wl;
+            int threads = std::min(eval_threads, target_count);
+            std::vector<std::future<GlobalMoveEvalResult>> futures;
+            futures.reserve(threads);
+            for (int worker = 0; worker < threads; ++worker) {
+                int begin = worker * target_count / threads;
+                int end = (worker + 1) * target_count / threads;
+                futures.push_back(std::async(
+                    std::launch::async,
+                    [&, begin, end, current_proxy_snapshot, total_wl_snapshot]() {
+                        return evaluate_global_move_targets(
+                            b, pos, den_eval, cong_eval, cur_hpwl,
+                            total_wl_snapshot, wl_norm, current_proxy_snapshot,
+                            idx, targets, begin, end);
+                    }));
+            }
+            for (auto& fut : futures) {
+                GlobalMoveEvalResult result = fut.get();
+                probed += result.probed;
+                for (const GlobalMoveCandidate& candidate : result.candidates) {
+                    add_global_move_candidate(best_cells, candidate, current_proxy_snapshot);
+                }
+            }
+        }
+
+        for (const GlobalMoveCandidate& candidate : best_cells) {
+            Point target = candidate.point;
+            bool verify_full_proxy = idx < b.n_hard;
+            if (idx < b.n_hard &&
+                !hard_location_clear_for_macro(b, pos, idx, target)) {
+                Point legal;
+                if (!find_nonoverlap_in_global_cell(
+                        b, pos, idx, candidate.row, candidate.col,
+                        grid_rows, grid_cols, target, legal)) {
+                    ++rejected_by_legalize;
+                    continue;
+                }
+                target = legal;
+            }
+            if (accept_single_move_if_better(
+                    b, pos, den_eval, cong_eval, cur_hpwl, cur_total_wl,
+                    wl_norm, current, idx, target, verify_full_proxy)) {
+                ++accepted;
+                break;
+            }
+        }
+    }
+
+    std::cerr << "[vibeCpp] global grid move final proxy=" << current.proxy
+              << " WL=" << current.wirelength
+              << " density=" << current.density
+              << " congestion=" << current.congestion
+              << " considered=" << considered
+              << " probed=" << probed
+              << " accepted=" << accepted
+              << " rejected_by_legalize=" << rejected_by_legalize << "\n";
     return pos;
 }
 
@@ -2125,6 +2645,9 @@ std::vector<Point> place(const BenchmarkData& b, int seed) {
     int cong_iters = env_int("VIBECPP_CONGESTION_POLISH_ITERS", CONGESTION_POLISH_ITERS_DEFAULT);
     int hot_cong_iters = env_int("VIBECPP_HOT_CONGESTION_SA_ITERS", HOT_CONGESTION_SA_ITERS_DEFAULT);
     int swap_iters = env_int("VIBECPP_SWAP_SA_ITERS", SWAP_SA_ITERS_DEFAULT);
+    int global_move_grid = env_int("VIBECPP_GLOBAL_MOVE_GRID", GLOBAL_MOVE_GRID_DEFAULT);
+    int global_move_rows = env_int("VIBECPP_GLOBAL_MOVE_GRID_ROWS", global_move_grid);
+    int global_move_cols = env_int("VIBECPP_GLOBAL_MOVE_GRID_COLS", global_move_grid);
     int final_fix_iters = env_int("VIBECPP_FINAL_FIX_SA_ITERS", ALL_MACRO_SA_MAX_ITERS_DEFAULT);
 
     positions = parallel_sa_all_macro(
@@ -2174,6 +2697,10 @@ std::vector<Point> place(const BenchmarkData& b, int seed) {
         b, positions, original, large_mask, seed + 3505, hot_cong_iters);
 
     positions = swap_sa_polish(b, positions, seed + 4005, swap_iters);
+    clamp_positions(b, positions, original);
+
+    positions = global_grid_move_polish(
+        b, positions, seed + 4255, global_move_rows, global_move_cols);
     clamp_positions(b, positions, original);
 
     positions = parallel_sa_all_macro(

@@ -1926,7 +1926,8 @@ std::vector<Point> swap_sa_polish(const BenchmarkData &b,
   int completed_iters = 0;
 
   std::cerr << "[vibeCpp] swap SA movable_macros=" << by_area.size()
-            << " group_size=" << group_size << " iters=" << max_iters << "\n";
+            << " group_size=" << group_size << " iters=" << max_iters
+            << "\n";
 
   for (int iter = 1; iter <= max_iters; ++iter) {
     completed_iters = iter;
